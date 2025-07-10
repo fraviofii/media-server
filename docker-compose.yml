@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: media_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/usr/src/app # Mount current directory to the app's workdir
+    depends_on:
+      - mediamtx
+    command: gunicorn --bind 0.0.0.0:5000 "app:create_app()"
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mediamtx
+    restart: unless-stopped
+    ports:
+      - "9997:9997" # API
+      - "8554:8554" # RTSP
+      - "8888:8888" # HLS
+      - "8889:8889/udp" # WebRTC
+      - "1935:1935" # RTMP
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml
+      - ./recordings:/recordings # Store recordings on the host

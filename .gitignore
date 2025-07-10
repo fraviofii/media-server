@@ -1,0 +1,7 @@
+.venv
+*.pyc
+__pycache__/
+# Local configuration files
+.env
+*.mp4
+mediamtx_*

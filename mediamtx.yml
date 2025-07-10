@@ -1,0 +1,33 @@
+# Mediamtx configuration file.
+# For more information, see: https://bluenviron.github.io/mediamtx/
+
+# Enable the HTTP API on port 9997
+api: yes
+apiAddress: :9997
+
+# WebRTC/WHIP configuration
+webrtc: yes
+webrtcAddress: :8889
+
+# HLS configuration
+hls: yes
+hlsAddress: :8888
+
+# RTSP configuration
+rtsp: yes
+rtspAddress: :8554
+
+# RTMP configuration
+rtmp: yes
+rtmpAddress: :1935
+
+# Set an empty 'paths' block. All paths will be configured dynamically via the API.
+# This ensures that no stream can be published to an un-approved path.
+paths: {}
+
+# Global recording configuration
+# This will apply to all paths created via the API.
+record: yes
+recordPath: /recordings/
+recordFormat: fmp4
+recordDeleteAfter: 1h # auto-delete recordings after 1 hour
