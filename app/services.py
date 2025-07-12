@@ -1,7 +1,146 @@
 import requests
 import os
-
+import time
+from functools import wraps
 from flask import current_app
+
+# Simple in-memory cache for serverless
+_last_check_time = 0
+_check_interval = 30  # Check every 30 seconds at most
+
+def retry_on_failure(max_retries=3, delay=1):
+    """Decorator to retry function on failure."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except requests.exceptions.RequestException as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    current_app.logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
+                    time.sleep(delay * (2 ** attempt))  # Exponential backoff
+            return None
+        return wrapper
+    return decorator
+
+def ensure_mediamtx_paths(func):
+    """Decorator to ensure MediaMTX paths are in sync before executing the function."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        global _last_check_time
+        current_time = time.time()
+        
+        # Only check if enough time has passed since last check
+        if current_time - _last_check_time > _check_interval:
+            try:
+                _check_and_restore_paths()
+                _last_check_time = current_time
+            except Exception as e:
+                current_app.logger.warning(f"Failed to check/restore MediaMTX paths: {str(e)}")
+                # Continue with the original function even if path check fails
+        
+        return func(*args, **kwargs)
+    return wrapper
+
+def _check_and_restore_paths():
+    """Check if paths are in sync and restore if needed."""
+    try:
+        # Quick check - is MediaMTX reachable?
+        paths_url = f"{get_mediamtx_api_url()}/paths/list"
+        response = requests.get(paths_url, timeout=3)  # Short timeout for serverless
+        response.raise_for_status()
+        
+        # Get current paths from MediaMTX
+        mediamtx_paths = response.json().get('items', [])
+        mediamtx_path_names = [path.get('name') for path in mediamtx_paths]
+        
+        # Get paths from database
+        from app.models import StreamPath
+        db_paths = StreamPath.query.all()
+        db_path_names = [path.path_name for path in db_paths]
+        
+        # Find missing paths
+        missing_paths = [name for name in db_path_names if name not in mediamtx_path_names]
+        
+        if missing_paths:
+            current_app.logger.info(f"MediaMTX missing paths detected: {missing_paths}")
+            restored_count, errors = restore_paths_to_mediamtx()
+            current_app.logger.info(f"Auto-restored {restored_count} paths to MediaMTX")
+            
+            if errors:
+                current_app.logger.error(f"Errors during auto-restore: {errors}")
+                
+    except requests.exceptions.RequestException:
+        # MediaMTX is down or unreachable, skip restoration
+        current_app.logger.warning("MediaMTX is unreachable, skipping path check")
+    except Exception as e:
+        current_app.logger.error(f"Error in MediaMTX path check: {str(e)}")
+
+def restore_paths_to_mediamtx():
+    """Restore all paths from database to MediaMTX."""
+    from app.models import StreamPath
+    
+    try:
+        # Get all paths from database
+        paths = StreamPath.query.all()
+        
+        restored_count = 0
+        errors = []
+        
+        for path in paths:
+            success, error = add_path_to_mediamtx(path.path_name, enable_recording=True)
+            if success:
+                restored_count += 1
+                current_app.logger.info(f"Restored path: {path.path_name}")
+            else:
+                errors.append(f"Failed to restore path '{path.path_name}': {error}")
+        
+        if errors:
+            current_app.logger.warning(f"Some paths failed to restore: {errors}")
+        
+        current_app.logger.info(f"Restored {restored_count} paths to MediaMTX")
+        return restored_count, errors
+        
+    except Exception as e:
+        current_app.logger.error(f"Error restoring paths: {str(e)}")
+        return 0, [str(e)]
+
+def check_mediamtx_health():
+    """Check if MediaMTX is healthy and paths are in sync."""
+    try:
+        # Check if MediaMTX API is responding
+        paths_url = f"{get_mediamtx_api_url()}/paths/list"
+        response = requests.get(paths_url, timeout=5)
+        response.raise_for_status()
+        
+        # Get current paths from MediaMTX
+        mediamtx_paths = response.json().get('items', [])
+        mediamtx_path_names = [path.get('name') for path in mediamtx_paths]
+        
+        # Get paths from database
+        from app.models import StreamPath
+        db_paths = StreamPath.query.all()
+        db_path_names = [path.path_name for path in db_paths]
+        
+        # Find missing paths
+        missing_paths = [name for name in db_path_names if name not in mediamtx_path_names]
+        
+        return {
+            'healthy': len(missing_paths) == 0,
+            'missing_paths': missing_paths,
+            'mediamtx_paths': len(mediamtx_path_names),
+            'db_paths': len(db_path_names),
+            'mediamtx_reachable': True
+        }
+        
+    except requests.exceptions.RequestException as e:
+        return {
+            'healthy': False,
+            'error': str(e),
+            'mediamtx_reachable': False
+        }
 
 def get_recordings_path():
     return current_app.config['MEDIAMTX_RECORDINGS_PATH']
@@ -26,8 +165,9 @@ def update_path_recording(path_name, enable_recording):
     except requests.exceptions.RequestException as e:
         return False, str(e)
 
+@retry_on_failure(max_retries=3, delay=2)
 def add_path_to_mediamtx(path_name, enable_recording=False):
-    """Adds a new path configuration to Mediamtx via its API."""
+    """Adds a new path configuration to Mediamtx via its API with retry logic."""
     url = f"{get_mediamtx_api_url()}/config/paths/add/{path_name}"
     
     payload = {
@@ -39,7 +179,7 @@ def add_path_to_mediamtx(path_name, enable_recording=False):
     }
     
     try:
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
         return True, None
     except requests.exceptions.RequestException as e:

@@ -13,7 +13,10 @@ from app.services import (
     update_path_recording,
     get_mediamtx_api_url,
     validate_segment_duration,
-    update_path_recording_settings
+    update_path_recording_settings,
+    ensure_mediamtx_paths,
+    restore_paths_to_mediamtx,
+    check_mediamtx_health
 )
 
 bp = Blueprint('api', __name__)
@@ -39,6 +42,7 @@ def login():
 
 @bp.route('/paths', methods=['GET'])
 @jwt_required
+@ensure_mediamtx_paths
 def list_paths():
     """Lists all paths created by the authenticated user."""
     user_paths = StreamPath.query.filter_by(user_id=g.current_user.id).all()
@@ -46,6 +50,7 @@ def list_paths():
 
 @bp.route('/paths/new', methods=['POST'])
 @jwt_required
+@ensure_mediamtx_paths
 def create_path():
     """Creates a new streaming path."""
     data = request.get_json()
@@ -63,7 +68,9 @@ def create_path():
         return jsonify({'message': 'Failed to configure media server', 'error': error}), 500
 
     # If successful, save to our database
-    new_path = StreamPath(path_name=path_name, owner=g.current_user)
+    new_path = StreamPath()
+    new_path.path_name = path_name
+    new_path.user_id = g.current_user.id
     db.session.add(new_path)
     db.session.commit()
     
@@ -71,6 +78,7 @@ def create_path():
 
 @bp.route('/connections', methods=['GET'])
 @jwt_required
+@ensure_mediamtx_paths
 def get_connections():
     """Returns the current state of connections from Mediamtx."""
     connections, error = get_mediamtx_connections()
@@ -80,6 +88,7 @@ def get_connections():
 
 @bp.route('/recordings', methods=['GET'])
 @jwt_required
+@ensure_mediamtx_paths
 def list_recordings():
     """Lists all available MP4 recordings."""
     recordings, error = get_mediamtx_recordings()
@@ -89,6 +98,7 @@ def list_recordings():
 
 @bp.route('/paths/<path_name>/recording/start', methods=['POST'])
 @jwt_required
+@ensure_mediamtx_paths
 def start_recording(path_name):
     """Start recording for a specific path."""
     # Check if path exists in database
@@ -97,7 +107,7 @@ def start_recording(path_name):
         return jsonify({'message': 'Path not found'}), 404
     
     # Check if user owns the path
-    if stream_path.owner != g.current_user:
+    if stream_path.user_id != g.current_user.id:
         return jsonify({'message': 'Unauthorized'}), 403
     
     # Enable recording via MediaMTX API
@@ -109,6 +119,7 @@ def start_recording(path_name):
 
 @bp.route('/paths/<path_name>/recording/stop', methods=['POST'])
 @jwt_required
+@ensure_mediamtx_paths
 def stop_recording(path_name):
     """Stop recording for a specific path."""
     # Check if path exists in database
@@ -117,7 +128,7 @@ def stop_recording(path_name):
         return jsonify({'message': 'Path not found'}), 404
     
     # Check if user owns the path
-    if stream_path.owner != g.current_user:
+    if stream_path.user_id != g.current_user.id:
         return jsonify({'message': 'Unauthorized'}), 403
     
     # Disable recording via MediaMTX API
@@ -129,6 +140,7 @@ def stop_recording(path_name):
 
 @bp.route('/paths/<path_name>/recording/status', methods=['GET'])
 @jwt_required
+@ensure_mediamtx_paths
 def get_recording_status(path_name):
     """Get recording status for a specific path."""
     # Check if path exists in database
@@ -137,7 +149,7 @@ def get_recording_status(path_name):
         return jsonify({'message': 'Path not found'}), 404
     
     # Check if user owns the path
-    if stream_path.owner != g.current_user:
+    if stream_path.user_id != g.current_user.id:
         return jsonify({'message': 'Unauthorized'}), 403
     
     try:
@@ -157,6 +169,7 @@ def get_recording_status(path_name):
     
 @bp.route('/paths/<path_name>/recording/settings', methods=['PUT'])
 @jwt_required
+@ensure_mediamtx_paths
 def update_recording_settings(path_name):
     """Update recording settings for a specific path."""
     # Check if path exists in database
@@ -165,7 +178,7 @@ def update_recording_settings(path_name):
         return jsonify({'message': 'Path not found'}), 404
     
     # Check if user owns the path
-    if stream_path.owner != g.current_user:
+    if stream_path.user_id != g.current_user.id:
         return jsonify({'message': 'Unauthorized'}), 403
     
     data = request.get_json()
@@ -203,6 +216,7 @@ def update_recording_settings(path_name):
 
 @bp.route('/paths/<path_name>/recording/settings', methods=['GET'])
 @jwt_required
+@ensure_mediamtx_paths
 def get_recording_settings(path_name):
     """Get detailed recording settings for a specific path."""
     # Check if path exists in database
@@ -211,7 +225,7 @@ def get_recording_settings(path_name):
         return jsonify({'message': 'Path not found'}), 404
     
     # Check if user owns the path
-    if stream_path.owner != g.current_user:
+    if stream_path.user_id != g.current_user.id:
         return jsonify({'message': 'Unauthorized'}), 403
     
     try:
@@ -230,3 +244,42 @@ def get_recording_settings(path_name):
         }), 200
     except requests.exceptions.RequestException as e:
         return jsonify({'message': 'Failed to get recording settings', 'error': str(e)}), 500
+
+@bp.route('/health/mediamtx', methods=['GET'])
+@jwt_required
+def check_mediamtx_health_endpoint():
+    """Check MediaMTX health and restore paths if needed."""
+    health_status = check_mediamtx_health()
+    
+    if not health_status.get('healthy', False):
+        if health_status.get('missing_paths'):
+            # Attempt to restore missing paths
+            restored_count, errors = restore_paths_to_mediamtx()
+            return jsonify({
+                'status': 'recovered',
+                'missing_paths': health_status['missing_paths'],
+                'restored_count': restored_count,
+                'errors': errors
+            }), 200
+        else:
+            return jsonify({
+                'status': 'mediamtx_unreachable',
+                'error': health_status.get('error', 'Unknown error')
+            }), 503
+    else:
+        return jsonify({
+            'status': 'healthy',
+            'paths_in_sync': health_status['db_paths']
+        }), 200
+
+@bp.route('/admin/restore-paths', methods=['POST'])
+@jwt_required
+def restore_paths_endpoint():
+    """Manually restore all paths to MediaMTX."""
+    restored_count, errors = restore_paths_to_mediamtx()
+    
+    return jsonify({
+        'message': f'Restored {restored_count} paths to MediaMTX',
+        'restored_count': restored_count,
+        'errors': errors
+    }), 200
