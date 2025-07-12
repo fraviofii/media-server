@@ -21,7 +21,8 @@ def create_app():
         SECRET_KEY=os.getenv('SECRET_KEY'),
         SQLALCHEMY_DATABASE_URI=os.getenv('DATABASE_URL'),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
-        MEDIAMTX_API_URL=os.getenv('MEDIAMTX_API_URL')
+        MEDIAMTX_API_URL=os.getenv('MEDIAMTX_API_URL'),
+        MEDIAMTX_RECORDINGS_PATH=os.getenv('MEDIAMTX_RECORDINGS_PATH', './recordings')
     )
 
     # Initialize extensions with app
@@ -37,7 +38,7 @@ def create_app():
 
     # Add custom CLI command
     app.cli.add_command(create_user_command)
-
+    
     return app
 
 @click.command('create-user')
